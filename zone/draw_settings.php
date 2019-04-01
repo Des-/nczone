@@ -162,7 +162,8 @@ class draw_settings {
 
     protected function draw_players_civs(
         int $map_id,
-        array $user_ids,
+        array $this_team_user_ids,
+        array $other_team_user_ids,
         int $num_civs,
         int $extra_civs,
         bool $ignore_force = false
@@ -172,16 +173,39 @@ class draw_settings {
         $sql_add = '';
         $test_civ_add = [];
         $force_civ = [];
+        $both_teams_user_ids = array_merge($this_team_user_ids, $other_team_user_ids);
         if(!$ignore_force)
         {
-            $force_civ = $this->db->get_row([
-                'SELECT' => 'c.civ_id AS id, c.multiplier AS multiplier',
+            $force_civ_non_mirror = $this->db->get_row([
+                'SELECT' => 'c.civ_id AS id, c.multiplier AS multiplier, SUM(' . time() . ' - p.time) AS time',
                 'FROM' => [$this->db->map_civs_table => 'c', $this->db->player_civ_table => 'p'],
-                'WHERE' => 'c.civ_id = p.civ_id AND c.force_draw AND NOT c.prevent_draw AND c.map_id = ' . $map_id . ' AND ' . $this->db->sql_in_set('p.user_id', $user_ids),
+                'WHERE' => 'c.civ_id = p.civ_id AND c.force_draw AND NOT c.prevent_draw AND NOT c.both_teams AND c.map_id = ' . $map_id . ' AND ' . $this->db->sql_in_set('p.user_id', $this_team_user_ids),
                 'GROUP_BY' => 'c.civ_id',
                 'ORDER_BY' => 'SUM(' . time() . ' - p.time) DESC',
             ]);
-            if($force_civ)
+            $force_civ_mirror = $this->db->get_row([
+                'SELECT' => 'c.civ_id AS id, c.multiplier AS multiplier, SUM(' . time() . ' - p.time) AS time',
+                'FROM' => [$this->db->map_civs_table => 'c', $this->db->player_civ_table => 'p'],
+                'WHERE' => 'c.civ_id = p.civ_id AND c.force_draw AND NOT c.prevent_draw AND c.both_teams AND c.map_id = ' . $map_id . ' AND ' . $this->db->sql_in_set('p.user_id', $both_teams_user_ids),
+                'GROUP_BY' => 'c.civ_id',
+                'ORDER_BY' => 'SUM(' . time() . ' - p.time) DESC',
+            ]);
+
+            //$force_civ hier zusammenbauen
+            if ($force_civ_non_mirror && $force_civ_mirror) {
+                if ($force_civ_mirror['time']/2 > $force_civ_non_mirror['time']) {
+                    $force_civ = $force_civ_mirror;
+                }
+                else {
+                    $force_civ = $force_civ_non_mirror;
+                }
+            } elseif ($force_civ_non_mirror && !$force_civ_mirror) {
+                    $force_civ = $force_civ_non_mirror;
+            } elseif (!$force_civ_non_mirror && $force_civ_mirror) {
+                        $force_civ = $force_civ_mirror;
+            }
+
+            if($force_civ)    
             {
                 $force_civ_num = 1;
                 $sql_add = ' AND c.civ_id != ' . $force_civ['id'];
@@ -190,13 +214,23 @@ class draw_settings {
         }
 
         // get additional civs
-        $draw_civs = $this->db->get_num_rows([
+        $draw_civs_mirror = $this->db->get_num_rows([
             'SELECT' => 'c.civ_id AS id, c.multiplier AS multiplier',
             'FROM' => [$this->db->map_civs_table => 'c', $this->db->player_civ_table => 'p'],
-            'WHERE' => 'c.civ_id = p.civ_id AND NOT c.prevent_draw AND c.map_id = ' . $map_id . ' AND ' . $this->db->sql_in_set('p.user_id', $user_ids) . $sql_add,
+            'WHERE' => 'c.civ_id = p.civ_id AND NOT c.prevent_draw AND c.both_teams AND c.map_id = ' . $map_id . ' AND ' . $this->db->sql_in_set('p.user_id', $both_teams_user_ids) . $sql_add,
             'GROUP_BY' => 'c.civ_id',
             'ORDER_BY' => 'SUM(' . time() . ' - p.time) DESC',
         ], $num_civs + $extra_civs);
+
+        $draw_civs_non_mirror = $this->db->get_num_rows([
+            'SELECT' => 'c.civ_id AS id, c.multiplier AS multiplier',
+            'FROM' => [$this->db->map_civs_table => 'c', $this->db->player_civ_table => 'p'],
+            'WHERE' => 'c.civ_id = p.civ_id AND NOT c.prevent_draw AND NOT c.both_teams AND c.map_id = ' . $map_id . ' AND ' . $this->db->sql_in_set('p.user_id', $this_team_user_ids) . $sql_add,
+            'GROUP_BY' => 'c.civ_id',
+            'ORDER_BY' => 'SUM(' . time() . ' - p.time) DESC',
+        ], $num_civs + $extra_civs);
+
+        $draw_civs = array_slice(ksort($draw_civs_mirror + $draw_civs_non_mirror, 'time'), $num_civs + $extra_civs);
 
         if($extra_civs === 0)
         {
